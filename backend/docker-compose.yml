@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentmart-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentmart
+      POSTGRES_PASSWORD: agentmart_dev_password
+      POSTGRES_DB: agentmart_admin
+    ports:
+      - "5432:5432"
+    volumes:
+      - agentmart_pg:/var/lib/postgresql/data
+
+volumes:
+  agentmart_pg:

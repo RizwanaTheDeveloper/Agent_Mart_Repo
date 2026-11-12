@@ -1,0 +1,410 @@
+// Agent Mart | Platform Admin - database schema
+// Relationships are implementation inferences from the handover spec (section 7) -
+// confirm foreign keys and constraints with product owners.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum AdminRole {
+  super_admin
+  moderator
+  support
+  auditor
+}
+
+enum AccountRole {
+  buyer
+  seller
+}
+
+enum ModerationStatus {
+  pending
+  reviewed
+  blocked
+  info_requested
+}
+
+enum CaseStatus {
+  open
+  investigating
+  resolved
+  dismissed
+}
+
+enum InterestStatus {
+  open
+  closed
+}
+
+enum InterestStage {
+  enquiry
+  site_visit_requested
+  site_visit_scheduled
+  site_visit_completed
+  negotiation
+  closed
+}
+
+enum AnnouncementAudience {
+  all
+  buyers
+  sellers
+  firms
+}
+
+enum ImportStatus {
+  validated
+  failed
+  committed
+}
+
+// ---------------------------------------------------------------------------
+// Marketplace entities (managed by admins)
+// ---------------------------------------------------------------------------
+
+model Firm {
+  id          String    @id @default(uuid()) @db.Uuid
+  name        String    @db.VarChar(200)
+  suspended   Boolean   @default(false)
+  suspendedAt DateTime? @map("suspended_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  users         Account[]
+  listings      Listing[]
+  documents     ListingDocument[]
+  subscriptions Subscription[]
+
+  @@index([name])
+  @@map("firms")
+}
+
+/// Buyer / seller marketplace accounts ("Accounts" module, "Users" entity in the spec).
+model Account {
+  id                String      @id @default(uuid()) @db.Uuid
+  name              String      @db.VarChar(200)
+  email             String      @unique @db.VarChar(320)
+  role              AccountRole
+  firmId            String?     @map("firm_id") @db.Uuid
+  active            Boolean     @default(true)
+  /// Marketplace app must reject any session issued before this timestamp.
+  sessionsRevokedAt DateTime?   @map("sessions_revoked_at")
+  lastLoginAt       DateTime?   @map("last_login_at")
+  createdAt         DateTime    @default(now()) @map("created_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+
+  firm          Firm?        @relation(fields: [firmId], references: [id], onDelete: SetNull)
+  interests     Interest[]
+  reportedCases ReportCase[]
+
+  @@index([firmId])
+  @@map("accounts")
+}
+
+/// Property listing ("Listings" module).
+model Listing {
+  id              String           @id @default(uuid()) @db.Uuid
+  title           String           @db.VarChar(300)
+  firmId          String?          @map("firm_id") @db.Uuid
+  type            String           @db.VarChar(50)
+  city            String           @db.VarChar(120)
+  priceInr        Decimal          @map("price_inr") @db.Decimal(15, 2)
+  version         Int              @default(1)
+  latitude        Float?
+  longitude       Float?
+  sellerPublished Boolean          @default(false) @map("seller_published")
+  moderation      ModerationStatus @default(pending)
+  moderationNote  String?          @map("moderation_note")
+  reviewedAt      DateTime?        @map("reviewed_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  firm      Firm?             @relation(fields: [firmId], references: [id], onDelete: SetNull)
+  cases     ReportCase[]
+  interests Interest[]
+  documents ListingDocument[]
+  summaries ListingSummary[]
+
+  @@index([firmId])
+  @@index([moderation])
+  @@index([city])
+  @@map("listings")
+}
+
+/// Buyer reports ("Cases" module).
+model ReportCase {
+  id          String     @id @default(uuid()) @db.Uuid
+  propertyId  String     @map("property_id") @db.Uuid
+  reporterId  String?    @map("reporter_id") @db.Uuid
+  category    String     @db.VarChar(80)
+  description String
+  report      String?
+  status      CaseStatus @default(open)
+  staffNote   String?    @map("staff_note")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  property Listing  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  reporter Account? @relation(fields: [reporterId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([propertyId])
+  @@map("cases")
+}
+
+/// Enquiry / site-visit metadata. Private message bodies are NOT stored or exposed here.
+model Interest {
+  id           String         @id @default(uuid()) @db.Uuid
+  propertyId   String         @map("property_id") @db.Uuid
+  buyerId      String?        @map("buyer_id") @db.Uuid
+  status       InterestStatus @default(open)
+  stage        InterestStage  @default(enquiry)
+  messageCount Int            @default(0) @map("message_count")
+  siteVisitAt  DateTime?      @map("site_visit_at")
+  closedAt     DateTime?      @map("closed_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  property Listing  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  buyer    Account? @relation(fields: [buyerId], references: [id], onDelete: SetNull)
+
+  @@index([status, stage])
+  @@index([propertyId])
+  @@map("interests")
+}
+
+/// Encrypted document METADATA only. File bytes live in external encrypted storage.
+model ListingDocument {
+  id         String   @id @default(uuid()) @db.Uuid
+  firmId     String?  @map("firm_id") @db.Uuid
+  propertyId String?  @map("property_id") @db.Uuid
+  label      String   @db.VarChar(200)
+  mime       String   @db.VarChar(120)
+  sizeBytes  Int      @map("size_bytes")
+  /// Opaque pointer into encrypted storage. Never returned by the admin API.
+  storageKey String   @map("storage_key")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  firm     Firm?    @relation(fields: [firmId], references: [id], onDelete: SetNull)
+  property Listing? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+
+  @@index([firmId])
+  @@index([propertyId])
+  @@map("documents")
+}
+
+/// AI-generated listing text ("Summaries" module).
+model ListingSummary {
+  id            String   @id @default(uuid()) @db.Uuid
+  propertyId    String   @map("property_id") @db.Uuid
+  sourceVersion Int      @map("source_version")
+  language      String   @db.VarChar(10)
+  kind          String   @db.VarChar(40)
+  summary       String
+  approved      Boolean  @default(false)
+  blocked       Boolean  @default(false)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  property Listing @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId])
+  @@index([blocked])
+  @@map("summaries")
+}
+
+model Plan {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique @db.VarChar(100)
+  maxStaff    Int      @map("max_staff")
+  maxListings Int      @map("max_listings")
+  priceInr    Int      @map("price_inr")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+/// Manual plan assignment to a firm. Only one active row per firm (enforced in service layer).
+model Subscription {
+  id           String    @id @default(uuid()) @db.Uuid
+  firmId       String    @map("firm_id") @db.Uuid
+  planId       String    @map("plan_id") @db.Uuid
+  assignedById String?   @map("assigned_by_id") @db.Uuid
+  active       Boolean   @default(true)
+  startsAt     DateTime  @default(now()) @map("starts_at")
+  endsAt       DateTime? @map("ends_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  firm       Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  plan       Plan   @relation(fields: [planId], references: [id], onDelete: Restrict)
+  assignedBy Admin? @relation(fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@index([firmId, active])
+  @@map("subscriptions")
+}
+
+model Announcement {
+  id          String               @id @default(uuid()) @db.Uuid
+  title       String               @db.VarChar(200)
+  body        String
+  audience    AnnouncementAudience @default(all)
+  active      Boolean              @default(false)
+  createdById String?              @map("created_by_id") @db.Uuid
+  createdAt   DateTime             @default(now()) @map("created_at")
+  updatedAt   DateTime             @updatedAt @map("updated_at")
+
+  createdBy Admin? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([active])
+  @@map("announcements")
+}
+
+// ---------------------------------------------------------------------------
+// Parcel reference imports
+// ---------------------------------------------------------------------------
+
+model ImportBatch {
+  id            String       @id @default(uuid()) @db.Uuid
+  filename      String?      @db.VarChar(255)
+  status        ImportStatus
+  featureCount  Int          @map("feature_count")
+  validCount    Int          @map("valid_count")
+  errorCount    Int          @map("error_count")
+  /// [{ index, field, message }]
+  errors        Json         @default("[]")
+  /// Normalised, whitelisted rows ready for commit.
+  rows          Json
+  payloadSha256 String       @map("payload_sha256") @db.VarChar(64)
+  createdById   String?      @map("created_by_id") @db.Uuid
+  committedById String?      @map("committed_by_id") @db.Uuid
+  committedAt   DateTime?    @map("committed_at")
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  createdBy   Admin?            @relation("ImportCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  committedBy Admin?            @relation("ImportCommittedBy", fields: [committedById], references: [id], onDelete: SetNull)
+  parcels     ParcelReference[]
+
+  @@index([createdAt])
+  @@map("import_batches")
+}
+
+/// Curated parcel reference data. These are NOT marketplace sale listings.
+model ParcelReference {
+  id            String   @id @default(uuid()) @db.Uuid
+  plotCode      String   @unique @map("plot_code") @db.VarChar(64)
+  plotNo        String?  @map("plot_no") @db.VarChar(64)
+  luDesc        String?  @map("lu_desc") @db.VarChar(200)
+  extnSqyrd     Float?   @map("extn_sqyrd")
+  areaSqm       Float?   @map("area_sqm")
+  rdWidthM      Float?   @map("rd_width_m")
+  district      String?  @db.VarChar(120)
+  mandal        String?  @db.VarChar(120)
+  village       String?  @db.VarChar(120)
+  rsNo          String?  @map("rs_no") @db.VarChar(64)
+  zoning        String?  @db.VarChar(120)
+  latitude      Float?
+  longitude     Float?
+  importBatchId String?  @map("import_batch_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  importBatch ImportBatch? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+
+  @@index([district, mandal, village])
+  @@map("parcel_references")
+}
+
+// ---------------------------------------------------------------------------
+// Administrators, sessions, audit, settings
+// ---------------------------------------------------------------------------
+
+model Admin {
+  id               String    @id @default(uuid()) @db.Uuid
+  name             String    @db.VarChar(200)
+  email            String    @unique @db.VarChar(320)
+  role             AdminRole
+  active           Boolean   @default(true)
+  passwordHash     String    @map("password_hash")
+  failedLoginCount Int       @default(0) @map("failed_login_count")
+  lockedUntil      DateTime? @map("locked_until")
+  lastLoginAt      DateTime? @map("last_login_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  sessions         AdminSession[]
+  auditLogs        AuditLog[]
+  subscriptions    Subscription[]
+  announcements    Announcement[]
+  importsCreated   ImportBatch[]  @relation("ImportCreatedBy")
+  importsCommitted ImportBatch[]  @relation("ImportCommittedBy")
+
+  @@map("admins")
+}
+
+model AdminSession {
+  id            String    @id @default(uuid()) @db.Uuid
+  adminId       String    @map("admin_id") @db.Uuid
+  /// SHA-256 of the bearer token. Raw tokens are never stored.
+  tokenHash     String    @unique @map("token_hash") @db.VarChar(64)
+  expiresAt     DateTime  @map("expires_at")
+  elevatedUntil DateTime? @map("elevated_until")
+  revokedAt     DateTime? @map("revoked_at")
+  ip            String?   @db.VarChar(64)
+  userAgent     String?   @map("user_agent") @db.VarChar(400)
+  lastSeenAt    DateTime  @default(now()) @map("last_seen_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  admin Admin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@map("admin_sessions")
+}
+
+/// Append-only administrator action history.
+model AuditLog {
+  id         String     @id @default(uuid()) @db.Uuid
+  adminId    String?    @map("admin_id") @db.Uuid
+  adminEmail String?    @map("admin_email") @db.VarChar(320)
+  adminRole  AdminRole? @map("admin_role")
+  module     String     @db.VarChar(40)
+  action     String     @db.VarChar(80)
+  targetId   String?    @map("target_id") @db.VarChar(64)
+  reason     String?
+  metadata   Json?
+  ip         String?    @db.VarChar(64)
+  userAgent  String?    @map("user_agent") @db.VarChar(400)
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  admin Admin? @relation(fields: [adminId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([module, createdAt])
+  @@index([adminId])
+  @@map("audit_logs")
+}
+
+/// Singleton row (id = 1).
+model PlatformSettings {
+  id                  Int      @id @default(1)
+  publicationEnabled  Boolean  @default(true) @map("publication_enabled")
+  registrationEnabled Boolean  @default(true) @map("registration_enabled")
+  aiGenerationEnabled Boolean  @default(false) @map("ai_generation_enabled")
+  updatedById         String?  @map("updated_by_id") @db.Uuid
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("platform_settings")
+}
